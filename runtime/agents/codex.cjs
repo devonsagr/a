@@ -41,7 +41,7 @@ const threadIdOf = (sessionPath) => {
   return all && all.length ? all[all.length - 1] : null;
 };
 
-function createCodexRuntime({ log } = {}) {
+function createCodexRuntime({ log, appServerArgs = [] } = {}) {
   const say = log || (() => {});
   let proc = null;            // the app-server child
   let ready = null;           // initialize handshake
@@ -93,7 +93,7 @@ function createCodexRuntime({ log } = {}) {
     if (proc && ready) return ready;
     const b = await bin();
     if (!b) throw new Error('codex is not installed (no `codex` on PATH or in the usual places)');
-    proc = spawn(b, ['app-server'], { env: childEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+    proc = spawn(b, ['app-server', ...appServerArgs], { env: childEnv(), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     buf = '';
     proc.stdout.on('data', (d) => {
       buf += d.toString();
@@ -195,6 +195,10 @@ function createCodexRuntime({ log } = {}) {
   function serverRequest(msg, run) {
     const reply = (result) => write({ jsonrpc: '2.0', id: msg.id, result });
     const params = msg.params ?? {};
+    if (run?.canvasMode === 'discussion' && msg.method !== 'item/tool/requestUserInput') {
+      if (msg.method === 'item/permissions/requestApproval') return reply({ permissions: {}, scope: 'turn' });
+      return reply({ decision: 'decline' });
+    }
     if (!run) {
       // nobody at the canvas for this thread: fail closed
       if (msg.method === 'item/tool/requestUserInput') return reply({ answers: {} });
@@ -280,6 +284,11 @@ function createCodexRuntime({ log } = {}) {
   return {
     available: () => bin(),
 
+    async readThread(threadId) {
+      await ensureServer();
+      return (await send('thread/read', { threadId, includeTurns: true })).thread;
+    },
+
     async models() {
       const b = await bin();
       if (!b) return { installed: false, models: [], default: null, searched: await searched() };
@@ -300,7 +309,7 @@ function createCodexRuntime({ log } = {}) {
       await ensureServer();
       const runId = randomUUID();
       const emit = (event) => { try { onEvent({ runId, event }); } catch { /* renderer gone */ } };
-      const state = { runId, threadId: null, turnId: null, text: '', final: null, waiting: false, emit, end: null, done: null,
+      const state = { runId, canvasMode: req.canvasMode, threadId: null, turnId: null, text: '', final: null, waiting: false, emit, end: null, done: null,
         // what this conversation already allowed for good (see README: `rule`)
         allowRules: new Set(Array.isArray(req.allowRules) ? req.allowRules.filter((s) => typeof s === 'string' && s.startsWith('codex:')) : []) };
       state.done = new Promise((resolve) => { state.end = (how) => { if (state.ended) return; state.ended = true; resolve(how); }; });
@@ -317,8 +326,15 @@ function createCodexRuntime({ log } = {}) {
           setTimeout(() => state.end('idle'), 5000);
         }, 15000);
         try {
-          const policy = await policyFor(cwd);
+          // Project Canvas owns the distinction between discussion and editing.
+          // Its policy cannot be escalated by a guard file in an imported repo.
+          const policy = req.canvasMode === 'discussion'
+            ? { approvalPolicy: 'on-request', sandbox: 'read-only' }
+            : req.canvasMode === 'implementation'
+              ? { approvalPolicy: 'on-request', sandbox: 'workspace-write' }
+              : await policyFor(cwd);
           const model = (req.model && typeof req.model === 'object' && req.model.id ? req.model.id : null) ?? await defaultModelId();
+          if (state.cancelRequested) { state.emit({ type: 'run_end', text: '', how: 'aborted' }); return; }
           let thread;
           const resumeId = req.sessionPath ? threadIdOf(req.sessionPath) : null;
           if (req.forkEntryId && resumeId) thread = (await send('thread/fork', { threadId: resumeId, cwd, ...policy, ...(model ? { model } : {}) })).thread;
@@ -326,16 +342,19 @@ function createCodexRuntime({ log } = {}) {
           else thread = (await send('thread/start', { cwd, ...policy, ...(model ? { model } : {}) })).thread;
           state.threadId = thread.id;
           byThread.set(thread.id, runId);
-          state.emit({ type: 'session', sessionId: thread.id, sessionFile: thread.path ?? null, model: model ? { provider: 'codex', id: model, name: model } : null, cwd });
+          state.emit({ type: 'session', sessionId: thread.id, sessionFile: thread.path ?? null, model: model ? { provider: 'codex', id: model, name: model } : null, cwd, runtimeProcessId: proc?.pid });
+          if (state.cancelRequested) { state.emit({ type: 'run_end', text: '', how: 'aborted' }); return; }
           const before = await snapshotDir(cwd).catch(() => null);
           const input = [{ type: 'text', text: String(req.prompt ?? ''), text_elements: [] }];
           for (const img of Array.isArray(req.images) ? req.images : []) if (img && typeof img.data === 'string') input.push({ type: 'image', url: `data:${img.mimeType};base64,${img.data}` });
           const effort = req.effort && model ? effortFor(model, req.effort) : null;
           const started = await send('turn/start', { threadId: thread.id, input, ...(model ? { model } : {}), ...(effort ? { effort } : {}) }, 60 * 1000);
           state.turnId = started?.turn?.id ?? null;
+          state.emit({ type: 'turn_started', threadId: thread.id, turnId: state.turnId });
+          if (state.cancelRequested && state.turnId) await send('turn/interrupt', { threadId: thread.id, turnId: state.turnId }).catch(() => {});
           const how = await state.done;
           const ran = await turnEffortOf(thread.path);
-          if (ran) state.emit({ type: 'session', sessionId: thread.id, sessionFile: thread.path ?? null, model: model ? { provider: 'codex', id: model, name: model } : null, cwd, effort: ran });
+          if (ran) state.emit({ type: 'session', sessionId: thread.id, sessionFile: thread.path ?? null, model: model ? { provider: 'codex', id: model, name: model } : null, cwd, effort: ran, runtimeProcessId: proc?.pid });
           if (before) {
             const after = await snapshotDir(cwd).catch(() => null);
             if (after) { const d = diffSnapshots(before, after); if (d.changed.length || d.added.length || d.removed.length || d.truncated) state.emit({ type: 'fs_changes', ...d }); }
@@ -356,6 +375,7 @@ function createCodexRuntime({ log } = {}) {
     abort(runId) {
       const r = runs.get(runId);
       if (!r) return false;
+      r.cancelRequested = true;
       // withdraw any question still open for this run, then interrupt
       for (const [id, ask] of serverAsks) { if (id.startsWith('q-')) { /* the server's own timeout covers it */ } void ask; }
       if (r.threadId && r.turnId) send('turn/interrupt', { threadId: r.threadId, turnId: r.turnId }).catch(() => {});

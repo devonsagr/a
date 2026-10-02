@@ -59,3 +59,7 @@ desktop/why.mjs
 
 # IDE
 .idea/
+
+# Local Project Canvas verification and generated browser evidence
+/output/playwright/
+/project-canvas-data/

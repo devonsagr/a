@@ -1,9 +1,14 @@
 {
-  "name": "thoughtdag",
+  "name": "project-canvas",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.0.0",
   "type": "module",
   "scripts": {
+    "app": "node scripts/board-dev.mjs",
+    "start": "node project-server.mjs",
+    "mcp:board": "node scripts/board-mcp.mjs",
+    "test:board": "node --test tests/project-canvas/*.test.mjs",
+    "test:board:e2e": "node scripts/board-e2e.mjs",
     "dev": "vite",
     "server": "node server.mjs",
     "build": "tsc -b && vite build",
@@ -81,10 +86,10 @@
     "vite": "^7.3.1",
     "vitepress": "^1.6.4"
   },
-  "description": "An infinite canvas where LLM conversations grow into an editable thought graph. Read papers into maps; every answer knows where it came from.",
+  "description": "A local project canvas linking AI conversations, scoped visual requirements, isolated code versions and human acceptance.",
   "repository": {
     "type": "git",
-    "url": "https://github.com/chenxiachan/thoughtdag.git"
+    "url": "https://github.com/devonsagr/a.git"
   },
   "keywords": [
     "llm",

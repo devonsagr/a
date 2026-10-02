@@ -1,0 +1,168 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import express from 'express';
+import { chromium } from 'playwright-core';
+import { MockRunner, ROOT } from '../tests/project-canvas/fixtures.mjs';
+import { BoardService } from '../runtime/project-canvas/service.mjs';
+import { boardRouter } from '../runtime/project-canvas/http.mjs';
+
+const evidence = path.join(ROOT, 'output', 'playwright');
+await fs.mkdir(evidence, { recursive: true });
+await fs.mkdir(path.join(ROOT, '.local-e2e'), { recursive: true });
+const dataDir = await fs.mkdtemp(path.join(ROOT, '.local-e2e', '浏览器验证-'));
+let service = new BoardService({ dataDir, runner: new MockRunner({ realBuild: true, delay: 40 }) });
+async function listen(port = 0) {
+  const app = express(); app.use(express.json({ limit: '30mb' })); app.use('/api/board', boardRouter(service)); app.use(express.static(path.join(ROOT, 'dist')));
+  return new Promise((resolve, reject) => { const listener = app.listen(port, '127.0.0.1'); listener.once('listening', () => resolve(listener)); listener.once('error', reject); });
+}
+let server = await listen();
+const url = `http://127.0.0.1:${server.address().port}`;
+const systemChrome = process.platform === 'win32' ? 'C:/Program Files/Google/Chrome/Application/chrome.exe' : '/usr/bin/chromium';
+const executablePath = process.env.PROJECT_CANVAS_BROWSER || (await fs.stat(systemChrome).catch(() => null) ? systemChrome : chromium.executablePath());
+const browser = await chromium.launch({ executablePath, headless: true });
+const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, locale: 'zh-CN' });
+const page = await context.newPage(), errors = [];
+page.on('pageerror', (error) => errors.push(error.message));
+let projectId;
+const project = () => service.get(projectId);
+const command = (type, input) => { const p = project(); return service.command(projectId, p.revision, { type, input }); };
+const inspect = async (nodeId) => {
+  const card = page.locator(`.react-flow__node[data-id="${nodeId}"]`);
+  await card.waitFor({ state: 'attached' });
+  await page.waitForTimeout(200);
+  await page.getByRole('button', { name: '查看全部', exact: true }).click();
+  await page.waitForTimeout(250);
+  await card.click();
+  await page.waitForTimeout(150);
+};
+async function waitUntil(check, message, timeout = 60000) {
+  const until = Date.now() + timeout;
+  while (Date.now() < until) { if (await check()) return; await new Promise((resolve) => setTimeout(resolve, 100)); }
+  throw new Error(message);
+}
+try {
+  await page.goto(url);
+  await page.getByRole('button', { name: '建立第一个项目' }).click();
+  await page.getByLabel('项目名称', { exact: true }).fill('登录体验验证');
+  await page.getByRole('dialog').getByRole('button', { name: '建立项目', exact: true }).click();
+  await waitUntil(() => service.list().length === 1, 'Project was not created'); projectId = service.list()[0].id;
+  await page.getByRole('button', { name: '添加对象', exact: true }).click();
+  await page.getByLabel('名称', { exact: true }).fill('登录页');
+  await page.getByRole('dialog').getByRole('button', { name: '添加对象', exact: true }).click();
+  await waitUntil(() => project().targets.length === 2, 'Page object missing');
+  await page.locator('.board-tree').getByRole('button', { name: '登录页', exact: true }).click();
+  await page.getByRole('button', { name: '添加对象', exact: true }).click();
+  await page.getByLabel('名称', { exact: true }).fill('提交按钮');
+  await page.getByRole('dialog').getByRole('button', { name: '添加对象', exact: true }).click();
+  await waitUntil(() => project().targets.length === 3, 'Component object missing');
+  await page.locator('.board-tree').getByRole('button', { name: '提交按钮', exact: true }).click();
+  const targetId = project().targets.at(-1).id;
+
+  // Create an explicit test reference image, then exercise region selection in the UI.
+  const referencePage = await context.newPage();
+  await referencePage.setContent('<html><body style="margin:0;background:#f4f5f2;padding:55px;font:18px system-ui"><h1>按钮参考示例</h1><button style="margin:25px 0;padding:18px 50px;border:0;border-radius:12px;background:#ffb800;font-size:22px">继续登录</button><p>仅参考按钮颜色和圆角</p></body></html>');
+  await referencePage.setViewportSize({ width: 650, height: 390 });
+  const referenceFile = path.join(evidence, 'reference-fixture.png'); await referencePage.screenshot({ path: referenceFile }); await referencePage.close();
+  await page.getByRole('button', { name: '视觉参考', exact: true }).click();
+  await page.getByLabel('上传参考图', { exact: true }).setInputFiles(referenceFile);
+  await page.getByTestId('region-editor').locator('img').waitFor({ state: 'visible' });
+  const region = await page.getByTestId('region-editor').boundingBox();
+  await page.mouse.move(region.x + region.width * .075, region.y + region.height * .35); await page.mouse.down();
+  await page.mouse.move(region.x + region.width * .49, region.y + region.height * .66, { steps: 8 }); await page.mouse.up();
+  await page.getByLabel('采纳这张图的哪些部分').fill('采用黄色背景和 12px 圆角');
+  await page.getByLabel('不需要采纳的部分').fill('忽略参考图的文案和外部背景');
+  await page.getByLabel('形成的具体要求').fill('提交按钮使用黄色背景，圆角 12px，文字清晰可读。');
+  await page.screenshot({ path: path.join(evidence, '01-visual-reference.png') });
+  await page.getByRole('button', { name: '保存为候选要求' }).click();
+  await waitUntil(() => project().requirements.length === 1, 'Visual requirement not saved');
+  const visualRuleId = project().requirements[0].id;
+  assert.ok(project().requirements[0].references[0].region.width > .35);
+  await inspect(visualRuleId);
+  const savedRegion = project().requirements[0].references[0].region;
+  await page.getByRole('button', { name: 'Zoom In', exact: true }).click();
+  await page.setViewportSize({ width: 1150, height: 900 });
+  const displayedRegion = await page.getByTestId('region-editor').boundingBox(), displayedBox = await page.getByTestId('region-box').boundingBox();
+  assert.ok(Math.abs(displayedBox.width / displayedRegion.width - savedRegion.width) < .015);
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.getByRole('button', { name: '确认生效', exact: true }).click();
+  await waitUntil(() => project().requirements[0].status === 'confirmed', 'Requirement confirmation failed');
+  await page.getByRole('button', { name: '选择讨论参考', exact: true }).click();
+  await page.getByLabel('上传讨论参考', { exact: true }).setInputFiles(referenceFile);
+  await waitUntil(() => project().assets.length === 2, 'Standalone reference upload failed');
+  await page.getByRole('button', { name: '完成选择', exact: true }).click();
+  await page.getByLabel('讨论输入').fill('为提交按钮设计登录页面，先讨论具体布局。');
+  await page.getByRole('button', { name: '发送', exact: true }).click();
+  await waitUntil(() => project().dialogues[0]?.status === 'completed', 'Discussion failed');
+  const dialogueId = project().dialogues[0].id;
+  assert.equal(project().dialogues[0].snapshot.requirements.length, 1);
+  assert.equal(project().dialogues[0].snapshot.assets.length, 2);
+  await inspect(dialogueId);
+  await page.getByRole('button', { name: '执行开发', exact: true }).click();
+  await page.getByLabel('方案名称', { exact: true }).fill('暖色按钮方案');
+  await page.screenshot({ path: path.join(evidence, '02-execution-inputs.png') });
+  await page.getByRole('dialog').getByRole('button', { name: '执行开发', exact: true }).click();
+  await waitUntil(() => project().runs[0] && ['completed', 'failed'].includes(project().runs[0].status), 'Development did not finish', 120000);
+  assert.equal(project().runs[0].status, 'completed', JSON.stringify(project().runs[0].checks) + project().runs[0].error);
+  const firstArtifact = project().artifacts[0];
+  await inspect(firstArtifact.id);
+  await page.getByRole('button', { name: '记录验收', exact: true }).click();
+  await page.getByLabel('验收说明（可选）', { exact: true }).fill('布局和按钮样式检查通过');
+  await page.getByRole('button', { name: '确认已验收', exact: true }).click();
+  await waitUntil(() => project().reviews.length === 1, 'Review record missing');
+  await page.getByRole('button', { name: '采纳方案', exact: true }).click();
+  await waitUntil(() => project().currentBranchId === firstArtifact.branchId, 'Branch adoption failed');
+  await page.getByRole('button', { name: '打开当前方案', exact: true }).click();
+  await page.getByRole('dialog').locator('iframe').contentFrame().getByRole('heading', { name: '欢迎回来' }).waitFor();
+  await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click();
+
+  // A second real build from the original dialogue produces a separate code snapshot.
+  let p = project(); service.startRun(p.id, p.revision, { dialogueId, name: '蓝色对照方案', instruction: 'BLUE_VARIANT 生成蓝色对照方案' }); await service.queue;
+  p = project(); assert.equal(p.artifacts.length, 2); assert.notEqual(p.artifacts[0].commit, p.artifacts[1].commit);
+  await inspect(firstArtifact.id); await page.getByRole('button', { name: '比较方案', exact: true }).click();
+  await waitUntil(() => page.getByRole('dialog').locator('iframe').count().then((count) => count === 2), 'Comparison frames missing');
+  await page.getByRole('dialog').locator('iframe').first().contentFrame().getByRole('heading', { name: '欢迎回来' }).waitFor();
+  await page.getByRole('dialog').locator('iframe').last().contentFrame().getByRole('heading', { name: '欢迎回来' }).waitFor();
+  await page.screenshot({ path: path.join(evidence, '03-compare-branches.png') });
+  await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click();
+  await inspect(visualRuleId); await page.getByRole('button', { name: '提出新版本', exact: true }).click();
+  await page.getByLabel('要求内容', { exact: true }).fill('提交按钮改为更大的 18px 文字，并保留黄色背景及圆角。');
+  await page.getByRole('button', { name: '保存候选', exact: true }).click();
+  await waitUntil(() => project().requirements.some((rule) => rule.supersedesId === visualRuleId), 'Updated requirement missing');
+  const nextRule = project().requirements.find((rule) => rule.supersedesId === visualRuleId);
+  await inspect(nextRule.id); await page.getByRole('button', { name: '确认生效', exact: true }).click();
+  await waitUntil(() => project().artifacts.every((artifact) => artifact.stale), 'Affected artifacts were not marked stale');
+  assert.equal(project().runs.length, 2);
+  await inspect(firstArtifact.id); await page.screenshot({ path: path.join(evidence, '04-review-needed.png') });
+  await page.getByRole('button', { name: '复核并验收', exact: true }).click();
+  await page.getByRole('button', { name: '确认已验收', exact: true }).click();
+  await waitUntil(() => project().reviews.length === 2, 'Recheck history missing');
+  assert.equal(project().artifacts[0].stale, false); assert.equal(project().artifacts[1].stale, true);
+  await page.getByRole('button', { name: '提出修改意见', exact: true }).click();
+  await page.getByLabel('具体要修改什么', { exact: true }).fill('保持这个方案，补充按钮提示');
+  await page.getByRole('button', { name: '保存修改意见', exact: true }).click();
+  await waitUntil(() => page.getByLabel('讨论输入').inputValue().then((value) => value === '保持这个方案，补充按钮提示'), 'Draft was not loaded into composer');
+  assert.equal(project().dialogues.at(-1).baseCommit, firstArtifact.commit);
+  await page.getByRole('button', { name: '只看对话分支', exact: true }).click();
+  assert.equal(await page.getByTestId('card-requirement').count(), 0);
+  await page.getByRole('button', { name: '显示完整项目', exact: true }).click();
+  const port = server.address().port, beforeRestart = project();
+  server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); await service.close();
+  service = new BoardService({ dataDir, runner: new MockRunner({ realBuild: true }) }); server = await listen(port);
+  assert.equal(project().runs.length, 2); assert.equal(project().assets.length, beforeRestart.assets.length);
+  assert.deepEqual(project().layout.positions, beforeRestart.layout.positions);
+  await page.reload(); await page.locator('.board-tree').getByRole('button', { name: '提交按钮', exact: true }).waitFor();
+  assert.equal(project().reviews.length, 3);
+  const raw = await fetch(`${url}/api/board/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'get_context', arguments: { projectId, targetId, dialogueIds: [dialogueId] } } }) });
+  const mcp = await raw.json(); assert.equal(JSON.parse(mcp.result.content[0].text).requirements[0].id, nextRule.id);
+  assert.deepEqual(errors, []);
+  await fs.writeFile(path.join(evidence, 'verification.json'), JSON.stringify({ passed: true, projectId, dataDir, scenarios: ['create', 'hierarchy', 'region-reference', 'confirm', 'discussion', 'frozen-context', 'real-build', 'screenshot', 'accept', 'adopt', 'independent-branches', 'compare', 'revision-staleness', 'reload', 'MCP-parity'], errors }, null, 2));
+  console.log('PASS: project canvas browser workflow, real builds, previews, review and MCP parity');
+  console.log(`Evidence: ${evidence}`);
+} catch (error) {
+  await page.screenshot({ path: path.join(evidence, 'failure.png') }).catch(() => {});
+  await fs.writeFile(path.join(evidence, 'failure.txt'), `${error.stack}\n\n${await page.locator('body').innerText()}\n${JSON.stringify(errors)}`);
+  throw error;
+} finally {
+  await browser.close(); server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); await service.close();
+}
