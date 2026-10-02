@@ -54,6 +54,16 @@ test('an unreconciled interrupted worker cannot be replaced in the same worktree
   assert.equal(f.service.get(p.id).runs.length, 1);
 });
 
+test('acceptance rejects requirements changed after the reviewer opened the checklist', async (t) => {
+  const f = await fixture(); t.after(() => f.close());
+  let p = await discussion(f.service, await setupProject(f.service));
+  f.service.startRun(p.id, p.revision, { dialogueId: p.dialogues[0].id }); await f.service.queue; p = f.service.get(p.id);
+  const artifact = p.artifacts[0], before = f.service.context(p.id, artifact.targetId).fingerprint;
+  p = f.service.command(p.id, p.revision, { type: 'requirement.confirm', input: { id: p.requirements[0].id } });
+  assert.throws(() => f.service.command(p.id, p.revision, { type: 'artifact.review', input: { id: artifact.id, result: 'accepted', expectedFingerprint: before } }), /验收期间规范已更新/);
+  assert.equal(f.service.get(p.id).reviews.length, 0);
+});
+
 test('import records custom scripts and output while preserving the original repository', async (t) => {
   const f = await fixture(); t.after(() => f.close());
   const seed = await f.service.create({ name: '原项目' });

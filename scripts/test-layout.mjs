@@ -19,14 +19,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = mkdtempSync(join(tmpdir(), 'tdag-layout-'));
 const bundle = join(tmp, 'layout.mjs');
-execFileSync(join(ROOT, 'node_modules/.bin/esbuild'), [
+execFileSync(process.execPath, [join(ROOT, 'node_modules/esbuild/bin/esbuild'),
   join(ROOT, 'src/lib/layout.ts'), '--bundle', '--format=esm', '--platform=node',
   `--outfile=${bundle}`, '--define:import.meta.env.VITE_API_BASE=""',
   '--define:import.meta.env.DEV=false',
 ], { stdio: ['ignore', 'ignore', 'pipe'] });
 const { autoLayout, nodeHeight } = await import(pathToFileURL(bundle).href);
 const framesBundle = join(tmp, 'frames.mjs');
-execFileSync(join(ROOT, 'node_modules/.bin/esbuild'), [
+execFileSync(process.execPath, [join(ROOT, 'node_modules/esbuild/bin/esbuild'),
   join(ROOT, 'src/lib/frames.ts'), '--bundle', '--format=esm', '--platform=node', `--outfile=${framesBundle}`,
 ], { stdio: ['ignore', 'ignore', 'pipe'] });
 const { frameMembers } = await import(pathToFileURL(framesBundle).href);

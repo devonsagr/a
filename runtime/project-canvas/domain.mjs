@@ -161,6 +161,7 @@ export function applyCommand(project, command, actor = 'human') {
       human(); const artifact = find(p.artifacts, input.id, '成果');
       requireValue(['accepted', 'changes'].includes(input.result), '验收结果无效。');
       requireValue(artifact.checks.build.passed && find(p.runs, artifact.runId).status === 'completed', '执行或构建未成功，不能验收。');
+      requireValue(!input.expectedFingerprint || input.expectedFingerprint === fingerprint(effectiveRequirements(p, artifact.targetId)), '验收期间规范已更新，请重新查看当前要求。', 409);
       const note = String(input.note ?? '').slice(0, 30000);
       requireValue(input.result !== 'changes' || note.trim(), '请说明需要修改的地方。');
       p.reviews.push({ id: id(), artifactId: artifact.id, result: input.result, note, fingerprint: fingerprint(effectiveRequirements(p, artifact.targetId)), requirementIds: effectiveRequirements(p, artifact.targetId).map((rule) => rule.id), createdAt: now() });
