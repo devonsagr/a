@@ -12,7 +12,7 @@ npm run test:board:e2e
 
 Node 原生测试覆盖：作用范围与候选生效、视觉区域及原图、分支上下文、历史代码版本、人工验收与精确采纳、局部规范变更、失败构建、排队/活动/检查阶段取消、事务冲突、进程锁、重启核对、交接包、HTTP/MCP 同步及草稿权限。
 
-布局测试沿用上游，检查箭头顺序、同链布局、重叠与基准画布。调用 esbuild 的 JS 入口，以支持 Windows 和中文路径。
+布局测试沿用上游，检查箭头顺序、同链布局、重叠与基准画布。使用 esbuild 的 JavaScript API，以兼容 Windows、Linux 和中文路径。
 
 端到端测试使用现有 Playwright Core 与系统 Chrome（Windows）或 Chromium（Linux）。可用 `PROJECT_CANVAS_BROWSER` 指定浏览器。它会在被忽略的 `.local-e2e/浏览器验证-*` 新建独立测试数据，不触碰用户项目，并实际执行两份前端代码构建、Git 提交、页面截图和方案预览。
 

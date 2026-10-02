@@ -10,7 +10,7 @@
 //   - the same graph, handed over in a different order, lays out the same way
 //
 // Run: node scripts/test-layout.mjs
-import { execFileSync } from 'node:child_process';
+import { buildSync } from 'esbuild';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -19,16 +19,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = mkdtempSync(join(tmpdir(), 'tdag-layout-'));
 const bundle = join(tmp, 'layout.mjs');
-execFileSync(process.execPath, [join(ROOT, 'node_modules/esbuild/bin/esbuild'),
-  join(ROOT, 'src/lib/layout.ts'), '--bundle', '--format=esm', '--platform=node',
-  `--outfile=${bundle}`, '--define:import.meta.env.VITE_API_BASE=""',
-  '--define:import.meta.env.DEV=false',
-], { stdio: ['ignore', 'ignore', 'pipe'] });
+buildSync({ entryPoints: [join(ROOT, 'src/lib/layout.ts')], bundle: true, format: 'esm', platform: 'node', outfile: bundle,
+  define: { 'import.meta.env.VITE_API_BASE': '""', 'import.meta.env.DEV': 'false' }, logLevel: 'silent' });
 const { autoLayout, nodeHeight } = await import(pathToFileURL(bundle).href);
 const framesBundle = join(tmp, 'frames.mjs');
-execFileSync(process.execPath, [join(ROOT, 'node_modules/esbuild/bin/esbuild'),
-  join(ROOT, 'src/lib/frames.ts'), '--bundle', '--format=esm', '--platform=node', `--outfile=${framesBundle}`,
-], { stdio: ['ignore', 'ignore', 'pipe'] });
+buildSync({ entryPoints: [join(ROOT, 'src/lib/frames.ts')], bundle: true, format: 'esm', platform: 'node', outfile: framesBundle, logLevel: 'silent' });
 const { frameMembers } = await import(pathToFileURL(framesBundle).href);
 
 let failures = 0;
